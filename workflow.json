@@ -1,22 +1,22 @@
 {
-  "name": "Inbox Triage – Naive",
+  "name": "Inbox Triage – Secured",
   "nodes": [
     {
       "parameters": {
         "httpMethod": "POST",
         "path": "email-in",
-        "responseMode": "lastNode",
+        "responseMode": "responseNode",
         "options": {}
       },
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
       "position": [
-        0,
-        0
+        -864,
+        208
       ],
-      "id": "a6261d3e-76bd-4ab5-aa25-4ba8e0d4da45",
-      "name": "Webhook",
-      "webhookId": "1fa4d829-4e7c-468c-8949-278970e4548d"
+      "id": "9bd7dc8f-1fcc-41df-89c7-15bdc9e41c3b",
+      "name": "Email In",
+      "webhookId": "8b013834-9518-4d8f-acfe-31265c4ed581"
     },
     {
       "parameters": {
@@ -32,11 +32,14 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        208,
-        0
+        -640,
+        208
       ],
-      "id": "9f5da102-11a5-462f-9c3f-e1ef6d7611c0",
-      "name": "HTTP Request",
+      "id": "720fea42-f583-4465-bd7d-8023f0c9ac56",
+      "name": "LLM Triage (Groq)",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
       "credentials": {
         "httpHeaderAuth": {
           "id": "tbjXw3sDEHsQdS0b",
@@ -47,16 +50,296 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const raw = $json.choices?.[0]?.message?.content ?? '';\nconst email = $('Webhook').item.json.body;\n\nlet ai;\nlet parseOk = true;\ntry {\n  ai = JSON.parse(raw);\n} catch (e) {\n  parseOk = false;\n  ai = { category: 'other', summary: '', draft_reply: '', action: 'none', forward_to: '' };\n}\n\nreturn {\n  sender: email.sender,\n  subject: email.subject,\n  body: email.body,\n  category: ai.category ?? 'other',\n  summary: ai.summary ?? '',\n  draft_reply: ai.draft_reply ?? '',\n  action: ai.action ?? 'none',\n  forward_to: ai.forward_to ?? '',\n  parse_ok: parseOk,\n  received_at: new Date().toISOString(),\n};"
+        "jsCode": "const raw = $json.choices?.[0]?.message?.content ?? '';\nconst email = $('Email In').item.json.body;\n\nlet ai;\nlet parseOk = true;\ntry {\n  ai = JSON.parse(raw);\n} catch (e) {\n  parseOk = false;\n  ai = { category: 'other', summary: '', draft_reply: '', action: 'none', forward_to: '' };\n}\n\nreturn {\n  sender: email.sender,\n  subject: email.subject,\n  body: email.body,\n  category: ai.category ?? 'other',\n  summary: ai.summary ?? '',\n  draft_reply: ai.draft_reply ?? '',\n  action: ai.action ?? 'none',\n  forward_to: ai.forward_to ?? '',\n  parse_ok: parseOk,\n  received_at: new Date().toISOString(),\n};"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        416,
-        0
+        -416,
+        208
       ],
-      "id": "07c25b57-6c93-40fa-a4c8-a8a59a8e262d",
-      "name": "Code in JavaScript"
+      "id": "a0749f4f-27ef-479f-9bd1-06b1dfdfb8ad",
+      "name": "Parse LLM Output"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ALLOWED_FORWARD = ['billing@acmesaas.com', 'support@acmesaas.com'];\nconst ALLOWED_ACTIONS = ['none', 'escalate', 'forward'];\nconst ALLOWED_CATEGORIES = ['billing', 'bug', 'sales', 'support', 'other'];\n\nconst r = { ...$json };\nconst flags = [];\n\n// 0. LLM output could not be parsed -> a human must look\nif (r.parse_ok === false) flags.push('parse_failed');\n\n// 1. Recipient allowlist: exact match only\nconst fwd = String(r.forward_to || '').trim().toLowerCase();\nif (fwd && !ALLOWED_FORWARD.includes(fwd)) {\n  flags.push(`blocked_forward:${fwd}`);\n  r.forward_to = '';\n  r.action = 'escalate';           // send to a human instead of silently dropping\n}\nif (r.action === 'forward' && !r.forward_to) r.action = 'escalate';\n\n// 2. Enum checks\nif (!ALLOWED_ACTIONS.includes(r.action)) { flags.push(`bad_action:${r.action}`); r.action = 'escalate'; }\nif (!ALLOWED_CATEGORIES.includes(r.category)) { flags.push(`bad_category:${r.category}`); r.category = 'other'; }\n\n// 3. Strip links from the draft reply\nconst urlPattern = /(https?:\\/\\/\\S+|www\\.\\S+|(?<![@\\w.-])[\\w-]+\\.(com|net|org|io|biz|co|in)\\b[^\\s@]*)/gi;\nif (urlPattern.test(r.draft_reply || '')) {\n  flags.push('removed_links');\n  r.draft_reply = r.draft_reply.replace(urlPattern, '[link removed]');\n}\n\nr.security_flags = flags.join(', ');\nr.needs_review = flags.length > 0;\n\n// Plain-text message for the Telegram review alert\nr.alert_text = [\n  'Needs human review',\n  `From: ${r.sender}`,\n  `Subject: ${r.subject}`,\n  `Category: ${r.category}`,\n  `Flags: ${r.security_flags}`,\n  `Summary: ${r.summary}`,\n].join('\\n');\n\nreturn r;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        208
+      ],
+      "id": "0dee4345-d96e-44f4-9a3e-548493aac1e1",
+      "name": "Security Guard"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5fbeb41e-6644-4324-a21d-1fe247184c5e",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "billing",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Billing"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3817798f-3631-447e-9352-d3c296cdc240",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "bug",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Bug"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3dc9b80d-9fa1-4f27-8c8f-4d9d96268a49",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "sales",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Sales"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "b4e7f3b3-02ce-496e-a9a6-486789caf62a",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "support",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Support"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Other"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        32,
+        208
+      ],
+      "id": "06f93d1d-18ab-4107-97f1-f5897c21341f",
+      "name": "Route by Category"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "46088959-068f-474d-9cc1-eea35c419056",
+              "name": "route",
+              "value": "Finance queue",
+              "type": "string"
+            },
+            {
+              "id": "64c0ed46-5d39-4a40-865d-94d5ee22f91c",
+              "name": "owner",
+              "value": "billing@acmesaas.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        -32
+      ],
+      "id": "307e0d08-7c5b-4b3b-a588-e5caff28991d",
+      "name": "Assign: Finance queue"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "7a16bde1-5b78-40ec-82d6-a7332bab2680",
+              "name": "route",
+              "value": "Engineering queue",
+              "type": "string"
+            },
+            {
+              "id": "254d5d6d-0492-40ca-8f89-21c87f2d1f2d",
+              "name": "owner",
+              "value": "support@acmesaas.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        96
+      ],
+      "id": "97fedf39-cf69-4286-ba6f-11d6443b200d",
+      "name": "Assign: Engineering queue"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0b616dd3-6606-4d64-94d7-10af0c500648",
+              "name": "route",
+              "value": "Sales pipeline",
+              "type": "string"
+            },
+            {
+              "id": "679efab6-083d-4333-bd8a-85c5d5ee278d",
+              "name": "owner",
+              "value": "sales@acmesaas.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        208
+      ],
+      "id": "4e6d7930-e01e-418c-ada7-0f37919c76a2",
+      "name": "Assign: Sales pipeline"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "23d9695e-8ae8-4eac-8dac-9f40d1dd043b",
+              "name": "route",
+              "value": "Support queue",
+              "type": "string"
+            },
+            {
+              "id": "38d20830-0a3f-4833-8973-d31559acfcdc",
+              "name": "owner",
+              "value": "support@acmesaas.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        336
+      ],
+      "id": "ff5e58f9-dd29-4302-b5d3-8fea0155fe13",
+      "name": "Assign: Support queue"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ce3a9e84-da96-4cfa-a2de-a75f597c6e8a",
+              "name": "route",
+              "value": "General inbox",
+              "type": "string"
+            },
+            {
+              "id": "f52bb88d-1c72-4c99-9696-5b134ca262cf",
+              "name": "owner",
+              "value": "support@acmesaas.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        448
+      ],
+      "id": "c22c768d-ef4b-4963-b1aa-5e4e2d1a6796",
+      "name": "Assign: General inbox"
     },
     {
       "parameters": {
@@ -78,7 +361,7 @@
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
-            "Parse OK": false,
+            "Parse OK": "={{ $json.parse_ok }}",
             "Sender": "={{ $json.sender }}",
             "Subject": "={{ $json.subject }}",
             "Body": "={{ $json.body }}",
@@ -87,7 +370,11 @@
             "Draft Reply": "={{ $json.draft_reply }}",
             "Action": "={{ $json.action }}",
             "Forward To": "={{ $json.forward_to }}",
-            "Received At": "={{ $json.received_at }}"
+            "Received At": "={{ $json.received_at }}",
+            "Security Flags": "={{ $json.security_flags }}",
+            "Needs Review": "={{ $json.needs_review }}",
+            "Route": "={{ $json.route }}",
+            "Owner": "={{ $json.owner }}"
           },
           "matchingColumns": [],
           "schema": [
@@ -200,6 +487,50 @@
               "type": "boolean",
               "readOnly": false,
               "removed": false
+            },
+            {
+              "id": "Security Flags",
+              "displayName": "Security Flags",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Needs Review",
+              "displayName": "Needs Review",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Route",
+              "displayName": "Route",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Owner",
+              "displayName": "Owner",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
             }
           ],
           "attemptToConvertTypes": false,
@@ -210,48 +541,258 @@
       "type": "n8n-nodes-base.airtable",
       "typeVersion": 2.1,
       "position": [
-        624,
-        0
+        464,
+        208
       ],
-      "id": "be1da4a2-5a66-4721-94a4-42f548930d8a",
-      "name": "Create a record",
+      "id": "3ae28416-ebcd-4211-be54-f53ce5e07d61",
+      "name": "Save to CRM (Airtable)",
       "credentials": {
         "airtableTokenApi": {
           "id": "jNAbXGc3ZAyLyZZB",
           "name": "Airtable Personal Access Token account"
         }
       }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        688,
+        208
+      ],
+      "id": "0bc73f41-8d69-4ee4-86bd-b34aab55638c",
+      "name": "Respond to Caller"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5e4f6ce4-ef64-4a56-8e1a-b548d32f0d04",
+              "leftValue": "={{ $('Security Guard').item.json.needs_review }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        912,
+        208
+      ],
+      "id": "91703d89-1bf3-469d-add3-29931fd7b8da",
+      "name": "Needs Review?"
+    },
+    {
+      "parameters": {
+        "chatId": "1301293934",
+        "text": "={{ $('Security Guard').item.json.alert_text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        128
+      ],
+      "id": "11a9a69c-42e6-45c1-9d76-99af32bed9b3",
+      "name": "Telegram: Review Alert",
+      "webhookId": "b001a95e-e5a6-497c-8649-49903a164c3c",
+      "credentials": {
+        "telegramApi": {
+          "id": "MHH0gcwHoZ1LGKB5",
+          "name": "Telegram account 2"
+        }
+      }
     }
   ],
   "pinData": {},
   "connections": {
-    "Webhook": {
+    "Email In": {
       "main": [
         [
           {
-            "node": "HTTP Request",
+            "node": "LLM Triage (Groq)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "HTTP Request": {
+    "LLM Triage (Groq)": {
       "main": [
         [
           {
-            "node": "Code in JavaScript",
+            "node": "Parse LLM Output",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Code in JavaScript": {
+    "Parse LLM Output": {
       "main": [
         [
           {
-            "node": "Create a record",
+            "node": "Security Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Security Guard": {
+      "main": [
+        [
+          {
+            "node": "Route by Category",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Category": {
+      "main": [
+        [
+          {
+            "node": "Assign: Finance queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Assign: Engineering queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Assign: Sales pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Assign: Support queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Assign: General inbox",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to CRM (Airtable)": {
+      "main": [
+        [
+          {
+            "node": "Respond to Caller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Caller": {
+      "main": [
+        [
+          {
+            "node": "Needs Review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Review?": {
+      "main": [
+        [
+          {
+            "node": "Telegram: Review Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign: Finance queue": {
+      "main": [
+        [
+          {
+            "node": "Save to CRM (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign: Engineering queue": {
+      "main": [
+        [
+          {
+            "node": "Save to CRM (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign: Sales pipeline": {
+      "main": [
+        [
+          {
+            "node": "Save to CRM (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign: Support queue": {
+      "main": [
+        [
+          {
+            "node": "Save to CRM (Airtable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign: General inbox": {
+      "main": [
+        [
+          {
+            "node": "Save to CRM (Airtable)",
             "type": "main",
             "index": 0
           }
@@ -263,13 +804,16 @@
   "settings": {
     "executionOrder": "v1",
     "binaryMode": "separate",
-    "availableInMCP": false
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "Kp7yAyxRKjIlbjbJ",
+    "callerPolicy": "workflowsFromSameOwner"
   },
-  "versionId": "b66f3051-081c-4762-9d9c-55cb74f1eed7",
+  "versionId": "64886145-75a5-4fac-bf3c-b28cfe0ba381",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "d9eafd1526ecbcf3fee297f211301ec1c33f81b370c8a25e6b85821ac966c88a"
   },
-  "id": "Ra5BNYymvYg2uoyZ",
+  "id": "3itNL6NXd6XR0YE8",
   "tags": []
 }

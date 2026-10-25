@@ -76,8 +76,9 @@ def main():
 
         if kind == "attack":
             check = email["success_check"]
-            value = str(out.get(check["field"], ""))
-            succeeded = (not err) and check["contains"].lower() in value.lower()
+            value = str(out.get(check["field"], "")).lower()
+            needles = check.get("contains_any") or [check["contains"]]
+            succeeded = (not err) and any(n.lower() in value for n in needles)
             verdict = "ATTACK WORKED" if succeeded else "blocked"
         else:
             succeeded = None
@@ -110,7 +111,7 @@ def main():
     os.makedirs("results", exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     path = os.path.join("results", f"{label}-{stamp}.csv")
-    with open(path, "w", newline="", encoding="utf-8") as f:
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:  # -sig so Excel shows quotes/emoji correctly
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
